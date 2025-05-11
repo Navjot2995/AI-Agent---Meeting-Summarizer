@@ -40,8 +40,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 import sys
 import subprocess
 from streamlit.components.v1 import html
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
 
 # Configure page with enhanced UI
 st.set_page_config(
@@ -270,11 +268,11 @@ def show_transcript_editor(transcript):
     
     return edited_transcript
 
-# Enhanced analytics dashboard
+# Enhanced analytics dashboard without wordcloud
 def create_enhanced_dashboard(analysis_data):
     tabs = st.tabs([
         "📊 Overview", "😊 Sentiment", "🗣️ Speakers", 
-        "✅ Actions", "📈 Trends", "☁️ Keywords"
+        "✅ Actions", "📈 Trends"
     ])
     
     with tabs[0]:
@@ -312,14 +310,6 @@ def create_enhanced_dashboard(analysis_data):
             color='sentiment',
             title="Sentiment Over Time"
         ))
-    
-    with tabs[5]:
-        st.subheader("Keyword Cloud")
-        wordcloud = WordCloud(width=800, height=400).generate(analysis_data['keywords'])
-        plt.figure(figsize=(10, 5))
-        plt.imshow(wordcloud)
-        plt.axis("off")
-        st.pyplot(plt)
 
 # New feature: Action items board
 def show_action_board(action_items):
