@@ -37,6 +37,8 @@ import spacy
 import networkx as nx
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import sys
+import subprocess
 
 # Configure page
 st.set_page_config(
@@ -60,13 +62,48 @@ try:
 except LookupError:
     nltk.download('stopwords')
 
-# Load spaCy model
+# Load spaCy model with better error handling
+def load_spacy_model():
+    """Load spaCy model with proper error handling."""
+    try:
+        return spacy.load('en_core_web_sm')
+    except OSError:
+        try:
+            # Try downloading the model if not found
+            st.info("Downloading spaCy model... This may take a few minutes.")
+            subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=True)
+            st.success("spaCy model downloaded successfully!")
+            return spacy.load('en_core_web_sm')
+        except Exception as e:
+            st.error(f"""
+            Failed to load spaCy model. Please ensure the model is installed:
+            
+            ```bash
+            python -m spacy download en_core_web_sm
+            ```
+            
+            Error details: {str(e)}
+            """)
+            st.stop()
+    except Exception as e:
+        st.error(f"Error loading spaCy model: {str(e)}")
+        st.stop()
+
+# Initialize spaCy with fallback
 try:
-    nlp = spacy.load('en_core_web_sm')
-except:
-    import subprocess
-    subprocess.run(['python', '-m', 'spacy', 'download', 'en_core_web_sm'])
-    nlp = spacy.load('en_core_web_sm')
+    nlp = load_spacy_model()
+except Exception as e:
+    st.warning(f"""
+    Failed to initialize spaCy. The application will continue with limited functionality.
+    Error: {str(e)}
+    """)
+    # Create a dummy NLP object for basic functionality
+    class DummyNLP:
+        def __call__(self, text):
+            return type('Doc', (), {'ents': []})()
+        def pipe(self, texts):
+            return [self(text) for text in texts]
+    nlp = DummyNLP()
 
 # Load environment variables
 load_dotenv()
