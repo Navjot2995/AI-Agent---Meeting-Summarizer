@@ -13,8 +13,9 @@ from datetime import datetime
 from docx import Document
 from fpdf import FPDF
 import nltk
-from nltk.tokenize import sent_tokenize
+from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.sentiment import SentimentIntensityAnalyzer
+from nltk.corpus import stopwords
 import json
 import noisereduce as nr
 import numpy as np
@@ -26,6 +27,16 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import pickle
 import base64
+import requests
+from urllib.parse import urlparse
+import mimetypes
+from collections import Counter
+import re
+from textblob import TextBlob
+import spacy
+import networkx as nx
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Configure page
 st.set_page_config(
@@ -44,6 +55,18 @@ try:
     nltk.data.find('sentiment/vader_lexicon')
 except LookupError:
     nltk.download('vader_lexicon')
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords')
+
+# Load spaCy model
+try:
+    nlp = spacy.load('en_core_web_sm')
+except:
+    import subprocess
+    subprocess.run(['python', '-m', 'spacy', 'download', 'en_core_web_sm'])
+    nlp = spacy.load('en_core_web_sm')
 
 # Load environment variables
 load_dotenv()
@@ -66,6 +89,7 @@ def get_groq_client():
             st.error("Groq API key is empty. Please provide a valid API key.")
             return None
 
+        # Initialize Groq client without proxies
         return groq.Groq(api_key=api_key)
     except Exception as e:
         st.error(f"Error initializing Groq client: {str(e)}")
@@ -342,131 +366,424 @@ def export_to_docx(summary, action_items, sentiment_analysis):
     doc.save(docx_path)
     return docx_path
 
+def download_meeting_recording(url):
+    """Download meeting recording from various platforms with enhanced error handling."""
+    try:
+        # Parse the URL to determine the platform
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower()
+
+        # Handle different meeting platforms
+        if 'zoom.us' in domain:
+            # Zoom recording download
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, stream=True, headers=headers, timeout=30)
+            if response.status_code == 200:
+                return response.content
+            elif response.status_code == 403:
+                st.error("Access denied. Please check if the Zoom recording is publicly accessible.")
+                return None
+            elif response.status_code == 404:
+                st.error("Recording not found. Please verify the Zoom recording URL.")
+                return None
+            else:
+                st.error(f"Failed to download Zoom recording. Status code: {response.status_code}")
+                return None
+        elif 'teams.microsoft.com' in domain:
+            # Teams recording download
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, stream=True, headers=headers, timeout=30)
+            if response.status_code == 200:
+                return response.content
+            elif response.status_code == 401:
+                st.error("Authentication required. Please ensure you're logged into Microsoft Teams.")
+                return None
+            elif response.status_code == 403:
+                st.error("Access denied. Please check your Teams permissions.")
+                return None
+            else:
+                st.error(f"Failed to download Teams recording. Status code: {response.status_code}")
+                return None
+        elif 'meet.google.com' in domain:
+            # Google Meet recording download
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, stream=True, headers=headers, timeout=30)
+            if response.status_code == 200:
+                return response.content
+            elif response.status_code == 401:
+                st.error("Authentication required. Please ensure you're logged into Google.")
+                return None
+            elif response.status_code == 403:
+                st.error("Access denied. Please check your Google Drive permissions.")
+                return None
+            else:
+                st.error(f"Failed to download Google Meet recording. Status code: {response.status_code}")
+                return None
+        else:
+            st.error("Unsupported meeting platform. Please provide a Zoom, Teams, or Google Meet recording URL.")
+            return None
+    except requests.exceptions.Timeout:
+        st.error("Download timed out. Please check your internet connection and try again.")
+        return None
+    except requests.exceptions.ConnectionError:
+        st.error("Connection error. Please check your internet connection and try again.")
+        return None
+    except Exception as e:
+        st.error(f"Error downloading meeting recording: {str(e)}")
+        return None
+
+def extract_key_topics(text):
+    """Extract key topics from the meeting transcript."""
+    try:
+        # Tokenize and remove stopwords
+        stop_words = set(stopwords.words('english'))
+        words = word_tokenize(text.lower())
+        words = [word for word in words if word.isalnum() and word not in stop_words]
+        
+        # Get word frequencies
+        word_freq = Counter(words)
+        
+        # Extract named entities using spaCy
+        doc = nlp(text)
+        entities = [ent.text for ent in doc.ents if ent.label_ in ['ORG', 'PRODUCT', 'PERSON', 'GPE']]
+        
+        # Combine word frequencies and entities
+        topics = word_freq.most_common(10) + [(entity, 1) for entity in set(entities)]
+        
+        return topics
+    except Exception as e:
+        st.error(f"Error extracting key topics: {str(e)}")
+        return []
+
+def analyze_speaker_engagement(transcription, speaker_segments):
+    """Analyze speaker engagement and interaction patterns."""
+    try:
+        # Create a graph for speaker interactions
+        G = nx.Graph()
+        
+        # Add nodes for each speaker
+        for speaker in speaker_segments.keys():
+            G.add_node(speaker)
+        
+        # Analyze interactions
+        interactions = []
+        for i, (speaker1, segments1) in enumerate(speaker_segments.items()):
+            for speaker2, segments2 in list(speaker_segments.items())[i+1:]:
+                # Count interactions between speakers
+                interaction_count = sum(1 for s1 in segments1 for s2 in segments2 
+                                     if abs(s1[0] - s2[0]) < 5)  # 5-second threshold
+                if interaction_count > 0:
+                    G.add_edge(speaker1, speaker2, weight=interaction_count)
+                    interactions.append((speaker1, speaker2, interaction_count))
+        
+        return G, interactions
+    except Exception as e:
+        st.error(f"Error analyzing speaker engagement: {str(e)}")
+        return None, []
+
+def analyze_meeting_structure(transcription):
+    """Analyze meeting structure and flow."""
+    try:
+        # Split into sentences
+        sentences = sent_tokenize(transcription)
+        
+        # Analyze sentence types
+        sentence_types = {
+            'questions': [],
+            'statements': [],
+            'decisions': []
+        }
+        
+        for sentence in sentences:
+            if '?' in sentence:
+                sentence_types['questions'].append(sentence)
+            elif any(word in sentence.lower() for word in ['decide', 'decided', 'agreed', 'agreement']):
+                sentence_types['decisions'].append(sentence)
+            else:
+                sentence_types['statements'].append(sentence)
+        
+        return sentence_types
+    except Exception as e:
+        st.error(f"Error analyzing meeting structure: {str(e)}")
+        return {}
+
+def create_enhanced_analytics_dashboard(transcription, sentiments, speaking_time, action_items, topics, speaker_engagement, meeting_structure):
+    """Create an enhanced analytics dashboard with more insights."""
+    # Create tabs for different analytics
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "Overview", "Sentiment Analysis", "Speaking Time", "Action Items",
+        "Key Topics", "Speaker Engagement", "Meeting Structure"
+    ])
+    
+    with tab1:
+        st.subheader("Meeting Overview")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Meeting Duration", f"{sum(speaking_time.values()):.2f} seconds")
+        with col2:
+            st.metric("Number of Speakers", len(speaking_time))
+        with col3:
+            st.metric("Action Items", len(action_items.split('\n')))
+        with col4:
+            st.metric("Key Topics", len(topics))
+    
+    with tab2:
+        st.subheader("Sentiment Analysis")
+        df = pd.DataFrame(sentiments)
+        fig = px.line(df, y=['positive', 'negative', 'neutral'], 
+                     title='Sentiment Analysis Over Time')
+        st.plotly_chart(fig)
+        
+        # Sentiment distribution pie chart
+        avg_sentiment = df[['positive', 'negative', 'neutral']].mean()
+        fig = px.pie(values=avg_sentiment.values, 
+                    names=avg_sentiment.index,
+                    title='Overall Sentiment Distribution')
+        st.plotly_chart(fig)
+    
+    with tab3:
+        st.subheader("Speaking Time Analysis")
+        # Speaking time bar chart
+        fig = px.bar(x=list(speaking_time.keys()),
+                    y=list(speaking_time.values()),
+                    title='Speaking Time per Speaker')
+        st.plotly_chart(fig)
+    
+    with tab4:
+        st.subheader("Action Items Analysis")
+        # Action items timeline
+        action_items_list = action_items.split('\n')
+        fig = go.Figure(data=[go.Table(
+            header=dict(values=['Action Item', 'Assignee', 'Deadline'],
+                       fill_color='paleturquoise',
+                       align='left'),
+            cells=dict(values=[[item.split(' - ')[0] for item in action_items_list],
+                             [item.split(' - ')[1] if ' - ' in item else 'Unassigned' for item in action_items_list],
+                             [item.split(' - ')[2] if ' - ' in item else 'No deadline' for item in action_items_list]],
+                      fill_color='lavender',
+                      align='left'))
+        ])
+        st.plotly_chart(fig)
+    
+    with tab5:
+        st.subheader("Key Topics Analysis")
+        # Display key topics
+        topics_df = pd.DataFrame(topics, columns=['Topic', 'Frequency'])
+        fig = px.bar(topics_df, x='Topic', y='Frequency',
+                    title='Key Topics Frequency')
+        st.plotly_chart(fig)
+    
+    with tab6:
+        st.subheader("Speaker Engagement Analysis")
+        if speaker_engagement[0]:
+            G, interactions = speaker_engagement
+            # Create network graph
+            pos = nx.spring_layout(G)
+            fig = go.Figure()
+            
+            # Add edges
+            for edge in G.edges(data=True):
+                x0, y0 = pos[edge[0]]
+                x1, y1 = pos[edge[1]]
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1, None], y=[y0, y1, None],
+                    mode='lines',
+                    line=dict(width=edge[2]['weight']),
+                    hoverinfo='none'
+                ))
+            
+            # Add nodes
+            for node in G.nodes():
+                x, y = pos[node]
+                fig.add_trace(go.Scatter(
+                    x=[x], y=[y],
+                    mode='markers+text',
+                    marker=dict(size=20),
+                    text=[node],
+                    hoverinfo='text'
+                ))
+            
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig)
+    
+    with tab7:
+        st.subheader("Meeting Structure Analysis")
+        # Display meeting structure statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Questions Asked", len(meeting_structure.get('questions', [])))
+        with col2:
+            st.metric("Decisions Made", len(meeting_structure.get('decisions', [])))
+        with col3:
+            st.metric("Statements Made", len(meeting_structure.get('statements', [])))
+        
+        # Display key decisions
+        if meeting_structure.get('decisions'):
+            st.write("Key Decisions:")
+            for decision in meeting_structure['decisions']:
+                st.write(f"- {decision}")
+
+def process_meeting_file(temp_file_path):
+    """Process the meeting file and generate enhanced analysis."""
+    try:
+        # Handle video files
+        if temp_file_path.lower().endswith(('.mp4', '.avi', '.mov')):
+            temp_file_path = extract_audio_from_video(temp_file_path)
+
+        # Convert to WAV if necessary
+        if not temp_file_path.lower().endswith('.wav'):
+            temp_file_path = convert_audio_to_wav(temp_file_path)
+
+        # Reduce noise
+        temp_file_path = reduce_noise(temp_file_path)
+
+        # Transcribe audio
+        st.write("Transcribing audio...")
+        transcription = transcribe_audio(temp_file_path)
+        
+        if transcription:
+            # Create tabs for different sections
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "Transcription", "Summary", "Action Items", "Analysis", "Enhanced Analytics"
+            ])
+            
+            with tab1:
+                st.subheader("Transcription")
+                st.write(transcription)
+
+            # Generate enhanced summary
+            st.write("Generating comprehensive summary...")
+            summary = summarize_text(transcription)
+            
+            with tab2:
+                if summary:
+                    st.subheader("Summary")
+                    st.write(summary)
+
+            # Extract action items
+            action_items = extract_action_items(transcription)
+            
+            with tab3:
+                if action_items:
+                    st.subheader("Action Items")
+                    st.write(action_items)
+
+            # Analyze sentiment
+            sentiments = analyze_sentiment(transcription)
+            
+            with tab4:
+                st.subheader("Sentiment Analysis")
+                df = pd.DataFrame(sentiments)
+                fig = px.line(df, y=['positive', 'negative', 'neutral'], 
+                            title='Sentiment Analysis Over Time')
+                st.plotly_chart(fig)
+
+            # Enhanced analysis
+            st.write("Performing enhanced analysis...")
+            topics = extract_key_topics(transcription)
+            speaker_engagement = analyze_speaker_engagement(transcription, 
+                {"Speaker 1": [(0, 100), (200, 300)], "Speaker 2": [(100, 200), (300, 400)]})
+            meeting_structure = analyze_meeting_structure(transcription)
+
+            # Create enhanced analytics dashboard
+            with tab5:
+                create_enhanced_analytics_dashboard(
+                    transcription,
+                    sentiments,
+                    {"Speaker 1": [(0, 100), (200, 300)], "Speaker 2": [(100, 200), (300, 400)]},
+                    action_items,
+                    topics,
+                    speaker_engagement,
+                    meeting_structure
+                )
+
+    except Exception as e:
+        st.error(f"Error processing meeting file: {str(e)}")
+    finally:
+        # Clean up temporary files
+        try:
+            os.unlink(temp_file_path)
+        except:
+            pass
+
 def main():
-    st.title("Advanced Meeting Summarizer AI")
-    st.write("Upload your meeting audio/video file for comprehensive analysis and insights.")
+    st.title("🎙️ Advanced Meeting Summarizer AI")
+    st.write("Upload your meeting recording or provide a meeting recording URL for comprehensive analysis.")
 
     # Sidebar for additional options
-    st.sidebar.header("Options")
-    export_format = st.sidebar.selectbox(
-        "Choose export format",
-        ["PDF", "DOCX", "TXT"]
-    )
-    
-    # Calendar integration option
-    create_calendar = st.sidebar.checkbox("Create Calendar Event")
-    if create_calendar:
-        meeting_title = st.sidebar.text_input("Meeting Title")
-        meeting_date = st.sidebar.date_input("Meeting Date")
-        meeting_time = st.sidebar.time_input("Meeting Time")
+    with st.sidebar:
+        st.header("Options")
+        export_format = st.selectbox(
+            "Choose export format",
+            ["PDF", "DOCX", "TXT"]
+        )
+        
+        # Calendar integration option
+        create_calendar = st.checkbox("Create Calendar Event")
+        if create_calendar:
+            meeting_title = st.text_input("Meeting Title")
+            meeting_date = st.date_input("Meeting Date")
+            meeting_time = st.time_input("Meeting Time")
 
-    uploaded_file = st.file_uploader("Choose an audio/video file", 
-                                   type=['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'avi', 'mov'])
+        # Add file size limit warning
+        st.info("Maximum file size: 100MB")
+
+    # Tabs for different input methods
+    tab1, tab2 = st.tabs(["Upload Recording", "Meeting URL"])
+    
+    with tab1:
+        uploaded_file = st.file_uploader(
+            "Choose a meeting recording file", 
+            type=['mp3', 'wav', 'm4a', 'ogg', 'mp4', 'avi', 'mov'],
+            help="Supported formats: MP3, WAV, M4A, OGG, MP4, AVI, MOV"
+        )
+
+    with tab2:
+        meeting_url = st.text_input(
+            "Enter meeting recording URL",
+            help="Supported platforms: Zoom, Microsoft Teams, Google Meet"
+        )
+        if meeting_url:
+            if st.button("Download and Process"):
+                with st.spinner("Downloading meeting recording..."):
+                    file_content = download_meeting_recording(meeting_url)
+                    if file_content:
+                        # Determine file extension from URL
+                        file_extension = os.path.splitext(urlparse(meeting_url).path)[1]
+                        if not file_extension:
+                            file_extension = '.mp4'  # Default to mp4
+                        file_name = f"meeting_recording{file_extension}"
+                        
+                        # Process the downloaded recording
+                        temp_file_path = process_meeting_recording(file_content, file_name)
+                        if temp_file_path:
+                            process_meeting_file(temp_file_path)
 
     if uploaded_file is not None:
+        # Check file size (100MB limit)
+        if uploaded_file.size > 100 * 1024 * 1024:  # 100MB in bytes
+            st.error("File size exceeds 100MB limit. Please upload a smaller file.")
+            return
+
         with st.spinner("Processing your file..."):
-            # Save uploaded file temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as temp_file:
-                temp_file.write(uploaded_file.getvalue())
-                temp_file_path = temp_file.name
+            try:
+                # Save uploaded file temporarily
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as temp_file:
+                    temp_file.write(uploaded_file.getvalue())
+                    temp_file_path = temp_file.name
 
-            # Handle video files
-            if uploaded_file.name.lower().endswith(('.mp4', '.avi', '.mov')):
-                temp_file_path = extract_audio_from_video(temp_file_path)
+                process_meeting_file(temp_file_path)
 
-            # Convert to WAV if necessary
-            if not uploaded_file.name.lower().endswith('.wav'):
-                temp_file_path = convert_audio_to_wav(temp_file_path)
-
-            # Reduce noise
-            temp_file_path = reduce_noise(temp_file_path)
-
-            # Transcribe audio
-            st.write("Transcribing audio...")
-            transcription = transcribe_audio(temp_file_path)
-            
-            if transcription:
-                # Create tabs for different sections
-                tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                    "Transcription", "Summary", "Action Items", "Analysis", "Analytics Dashboard"
-                ])
-                
-                with tab1:
-                    st.subheader("Transcription")
-                    st.write(transcription)
-
-                # Generate enhanced summary
-                st.write("Generating comprehensive summary...")
-                summary = summarize_text(transcription)
-                
-                with tab2:
-                    if summary:
-                        st.subheader("Summary")
-                        st.write(summary)
-
-                # Extract action items
-                action_items = extract_action_items(transcription)
-                
-                with tab3:
-                    if action_items:
-                        st.subheader("Action Items")
-                        st.write(action_items)
-
-                # Analyze sentiment
-                sentiments = analyze_sentiment(transcription)
-                
-                with tab4:
-                    st.subheader("Sentiment Analysis")
-                    df = pd.DataFrame(sentiments)
-                    fig = px.line(df, y=['positive', 'negative', 'neutral'], 
-                                title='Sentiment Analysis Over Time')
-                    st.plotly_chart(fig)
-
-                # Create analytics dashboard
-                with tab5:
-                    create_analytics_dashboard(
-                        transcription,
-                        sentiments,
-                        {"Speaker 1": [(0, 100), (200, 300)], "Speaker 2": [(100, 200), (300, 400)]},  # Example speaking time
-                        action_items
-                    )
-
-                # Export functionality
-                if st.sidebar.button("Export Summary"):
-                    if export_format == "PDF":
-                        file_path = export_to_pdf(summary, action_items, sentiments)
-                    elif export_format == "DOCX":
-                        file_path = export_to_docx(summary, action_items, sentiments)
-                    else:  # TXT
-                        with open("meeting_summary.txt", "w") as f:
-                            f.write(f"Summary:\n{summary}\n\nAction Items:\n{action_items}")
-                        file_path = "meeting_summary.txt"
-                    
-                    with open(file_path, "rb") as f:
-                        st.sidebar.download_button(
-                            label=f"Download {export_format}",
-                            data=f,
-                            file_name=f"meeting_summary.{export_format.lower()}",
-                            mime=f"application/{export_format.lower()}"
-                        )
-
-                # Create calendar event if requested
-                if create_calendar and meeting_title:
-                    meeting_datetime = datetime.combine(meeting_date, meeting_time)
-                    end_datetime = meeting_datetime.replace(hour=meeting_datetime.hour + 1)
-                    calendar_link = create_calendar_event(
-                        meeting_title,
-                        meeting_datetime,
-                        end_datetime,
-                        f"Meeting Summary:\n{summary}\n\nAction Items:\n{action_items}"
-                    )
-                    if calendar_link:
-                        st.sidebar.success(f"Calendar event created! [View Event]({calendar_link})")
-
-            # Clean up temporary files
-            os.unlink(temp_file_path)
-            if temp_file_path != uploaded_file.name:
-                os.unlink(temp_file_path)
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+                st.error("Please try again with a different file or contact support if the problem persists.")
 
 if __name__ == "__main__":
     main() 
