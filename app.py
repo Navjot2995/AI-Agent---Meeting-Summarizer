@@ -49,12 +49,30 @@ except LookupError:
 load_dotenv()
 
 # Configure Groq
-try:
-    # Try to get API key from Streamlit secrets
-    groq_client = groq.Groq(api_key=st.secrets["groq"]["api_key"])
-except:
-    # Fallback to environment variable
-    groq_client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
+def get_groq_client():
+    """Initialize and return Groq client with proper error handling."""
+    try:
+        # First try to get from Streamlit secrets
+        if "GROQ_API_KEY" in st.secrets:
+            api_key = st.secrets["GROQ_API_KEY"]
+        # Then try environment variable
+        elif "GROQ_API_KEY" in os.environ:
+            api_key = os.environ["GROQ_API_KEY"]
+        else:
+            st.error("Groq API key not found. Please set it in Streamlit secrets or environment variables.")
+            return None
+
+        if not api_key:
+            st.error("Groq API key is empty. Please provide a valid API key.")
+            return None
+
+        return groq.Groq(api_key=api_key)
+    except Exception as e:
+        st.error(f"Error initializing Groq client: {str(e)}")
+        return None
+
+# Initialize Groq client
+groq_client = get_groq_client()
 
 # Google Calendar API setup
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -230,6 +248,10 @@ def analyze_sentiment(text):
 
 def extract_action_items(text):
     """Extract action items from the transcript using Groq."""
+    if not groq_client:
+        st.error("Groq client not initialized. Please check your API key configuration.")
+        return None
+
     try:
         response = groq_client.chat.completions.create(
             model="mixtral-8x7b-32768",
@@ -248,9 +270,13 @@ def extract_action_items(text):
 
 def summarize_text(text):
     """Summarize text using Groq's LLM."""
+    if not groq_client:
+        st.error("Groq client not initialized. Please check your API key configuration.")
+        return None
+
     try:
         response = groq_client.chat.completions.create(
-            model="mixtral-8x7b-32768",  # Using Mixtral model for better performance
+            model="mixtral-8x7b-32768",
             messages=[
                 {"role": "system", "content": """You are a professional meeting summarizer. Create a comprehensive summary of the following meeting transcript. 
                 Include:
