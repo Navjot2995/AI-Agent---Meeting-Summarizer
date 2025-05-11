@@ -126,8 +126,21 @@ def get_groq_client():
             st.error("Groq API key is empty. Please provide a valid API key.")
             return None
 
-        # Initialize Groq client without proxies
-        return groq.Groq(api_key=api_key)
+        # Initialize Groq client with just the API key
+        client = groq.Groq(api_key=api_key)
+        
+        # Test the client with a simple request
+        try:
+            client.chat.completions.create(
+                model="mixtral-8x7b-32768",
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=5
+            )
+            return client
+        except Exception as e:
+            st.error(f"Error testing Groq client: {str(e)}")
+            return None
+
     except Exception as e:
         st.error(f"Error initializing Groq client: {str(e)}")
         return None
